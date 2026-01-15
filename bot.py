@@ -8,7 +8,7 @@ from aiogram.types import Message, ChatPermissions, InlineKeyboardButton, Inline
 from aiogram.enums import ParseMode, ChatMemberStatus
 
 # ─────────── НАСТРОЙКИ ───────────
-BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН"
+BOT_TOKEN = "8557190026:AAHAhHOxPQ4HlFHbGokpyTFoQ2R_a634rE4"
 OWNER_ID = 6708209142  # @vanezyyy
 OWNER_USERNAME = "vanezyyy"
 
