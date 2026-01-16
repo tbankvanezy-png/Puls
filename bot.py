@@ -10,7 +10,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 
 # ─────────── НАСТРОЙКИ ───────────
-BOT_TOKEN = "8557190026:AAHAhHOxPQ4HlFHbGokpyTFoQ2R_a634rE4"
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН"
 OWNER_ID = 6708209142  # @vanezyyy
 OWNER_USERNAME = "vanezyyy"
 ADMIN_PASSWORD = "vanezypuls13579cod"
