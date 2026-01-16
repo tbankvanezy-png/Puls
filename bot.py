@@ -1,47 +1,118 @@
 import asyncio
-import sqlite3
+import re
 from datetime import datetime, timedelta
+import sqlite3
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, ChatPermissions
-)
-from aiogram.enums import ParseMode, ChatMemberStatus
+from aiogram.types import Message, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.enums import ChatMemberStatus, ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 # ─────────── НАСТРОЙКИ ───────────
-BOT_TOKEN = "8557190026:AAHAhHOxPQ4HlFHbGokpyTFoQ2R_a634rE4"
+BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН"
 OWNER_ID = 6708209142
-ADMIN_PASSWORD = "vanezypuls13579cod"
+ADMIN_PANEL_PASSWORD = "vanezypuls13579cod"
 
-# ─────────── БОТ ───────────
-bot = Bot(
-    BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
+# ─────────── ИНИЦИАЛИЗАЦИЯ ───────────
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ─────────── БД ───────────
-conn = sqlite3.connect("puls.db")
+# ─────────── SQLite ───────────
+conn = sqlite3.connect("puls_bot.db")
 cur = conn.cursor()
 
+# Права модераторов
 cur.execute("""
-CREATE TABLE IF NOT EXISTS admin_access (
-    user_id INTEGER PRIMARY KEY,
-    unlocked INTEGER DEFAULT 0,
-    attempts INTEGER DEFAULT 0,
-    blocked_until INTEGER
+CREATE TABLE IF NOT EXISTS permissions(
+    chat_id INTEGER,
+    user_id INTEGER,
+    can_mute INTEGER DEFAULT 0,
+    can_ban INTEGER DEFAULT 0,
+    can_kick INTEGER DEFAULT 0,
+    PRIMARY KEY(chat_id, user_id)
 )
 """)
-
+# Система наказаний
+cur.execute("""
+CREATE TABLE IF NOT EXISTS punishments(
+    chat_id INTEGER,
+    user_id INTEGER,
+    type TEXT,
+    until TIMESTAMP,
+    reason TEXT
+)
+""")
+# Игровая система
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users(
+    user_id INTEGER PRIMARY KEY,
+    puls_coins INTEGER DEFAULT 0,
+    dollars INTEGER DEFAULT 0,
+    last_work TIMESTAMP,
+    work_count INTEGER DEFAULT 0,
+    last_game TIMESTAMP,
+    game_count INTEGER DEFAULT 0
+)
+""")
+# Админ-панель временные данные
+cur.execute("""
+CREATE TABLE IF NOT EXISTS admin_panel_lock(
+    user_id INTEGER PRIMARY KEY,
+    attempts INTEGER DEFAULT 0,
+    blocked_until TIMESTAMP
+)
+""")
 conn.commit()
 
-# ─────────── ПРАВА ───────────
-def mute_perms():
-    return ChatPermissions(can_send_messages=False)
+# ─────────── УТИЛИТЫ ───────────
+TIME_RE = re.compile(r"(\d+)([smhd])", re.IGNORECASE)
 
-def full_perms():
+def parse_time(text: str):
+    if text.lower() in ("0", "inf", "навсегда"):
+        return None
+    m = TIME_RE.match(text)
+    if not m:
+        return None
+    value, unit = m.groups()
+    value = int(value)
+    return {
+        "s": timedelta(seconds=value),
+        "m": timedelta(minutes=value),
+        "h": timedelta(hours=value),
+        "d": timedelta(days=value),
+    }[unit.lower()]
+
+async def is_creator(message: Message):
+    member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+    return member.status == ChatMemberStatus.OWNER
+
+async def has_permission(chat_id, user_id, command):
+    if user_id == OWNER_ID:
+        return True
+    cur.execute(f"SELECT {command} FROM permissions WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    row = cur.fetchone()
+    return row and row[0]
+
+async def resolve_user(message: Message, arg: str | None):
+    if message.reply_to_message:
+        return message.reply_to_message.from_user
+    if not arg:
+        return None
+    if arg.startswith("@"):
+        try:
+            member = await bot.get_chat_member(message.chat.id, arg[1:])
+            return member.user
+        except:
+            return None
+    if arg.isdigit():
+        try:
+            member = await bot.get_chat_member(message.chat.id, int(arg))
+            return member.user
+        except:
+            return None
+    return None
+
+def perms_all():
     return ChatPermissions(
         can_send_messages=True,
         can_send_media_messages=True,
@@ -49,139 +120,205 @@ def full_perms():
         can_add_web_page_previews=True
     )
 
-# ─────────── ПРИВЕТСТВИЕ БОТА В ГРУППЕ ───────────
-@dp.message(F.new_chat_members)
-async def bot_added(message: Message):
-    for user in message.new_chat_members:
-        if user.id == (await bot.me()).id:
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📜 Правила бота", url="https://t.me/RulesPulsOfficial/8")],
-                [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")],
-                [InlineKeyboardButton(text="➕ Добавить меня", url=f"https://t.me/{(await bot.me()).username}?startgroup=true")],
-            ])
-
-            await message.answer(
-                "🎉 <b>Добро пожаловать в Puls Bot!</b>\n\n"
-                "Я — универсальный бот для модерации и развлечений.\n\n"
-                "📌 Я могу:\n"
-                "• наказывать нарушителей\n"
-                "• помогать администраторам\n"
-                "• в будущем — игры и экономика\n\n"
-                "📖 Перед началом работы ознакомьтесь с правилами.\n"
-                "Продолжая пользоваться ботом, вы подтверждаете их.\n\n"
-                "✨ Приятного использования!",
-                reply_markup=kb
-            )
-
-# ─────────── /start ───────────
-@dp.message(F.text.regexp(r"(?i)^/start$"))
-async def start_cmd(message: Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📜 Правила бота", url="https://t.me/RulesPulsOfficial/8")],
-        [InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")],
-    ])
-
-    await message.answer(
-        f"👋 <b>Добро пожаловать в Puls Bot!</b>\n\n"
-        f"👤 Имя: {message.from_user.full_name}\n"
-        f"🆔 ID: <code>{message.from_user.id}</code>\n"
-        f"🔗 Username: @{message.from_user.username or 'нет'}\n\n"
-        f"Этот бот создан для удобного управления чатами.\n"
-        f"Используйте кнопки ниже 👇",
-        reply_markup=kb
+def perms_mute():
+    return ChatPermissions(
+        can_send_messages=False,
+        can_send_media_messages=False,
+        can_send_other_messages=False,
+        can_add_web_page_previews=False
     )
 
-# ─────────── ПОМОЩЬ ───────────
+# ─────────── ПРИВЕТСТВИЯ ───────────
+@dp.message(F.new_chat_members)
+async def on_join(message: Message):
+    for user in message.new_chat_members:
+        if user.id == (await bot.me).id:
+            kb = InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                InlineKeyboardButton("📜 Правила бота", url="https://t.me/RulesPulsOfficial/8"),
+                InlineKeyboardButton("🛠 Админ-панель", callback_data="admin_panel"),
+                InlineKeyboardButton("🎮 Играть", callback_data="game")
+            )
+            text = (
+                f"🎉 Добро пожаловать! Я — Puls Bot 🎊\n\n"
+                f"Я универсальный бот для модерации, игр и мини-экономики.\n"
+                f"Используйте кнопки ниже, чтобы ознакомиться с правилами или начать играть!"
+            )
+            await message.answer(text, reply_markup=kb)
+        else:
+            text = (
+                f"👋 <b>Новый участник!</b>\n\n"
+                f"👤 Имя: {user.full_name}\n"
+                f"🆔 ID: <code>{user.id}</code>\n"
+                f"🔗 Username: @{user.username if user.username else 'нет'}\n"
+                f"🤖 Бот: {'Да' if user.is_bot else 'Нет'}\n\n"
+                "Добро пожаловать! Для начала ознакомьтесь с правилами бота, "
+                "нажав кнопку 'Правила бота'. Продолжая пользоваться ботом, вы подтверждаете эти правила. "
+                "Добавьте меня в группу и веселитесь!"
+            )
+            await message.answer(text)
+
+@dp.message(F.left_chat_member)
+async def on_leave(message: Message):
+    user = message.left_chat_member
+    text = (
+        f"🚪 <b>Участник покинул чат</b>\n\n"
+        f"👤 Имя: {user.full_name}\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"🔗 Username: @{user.username if user.username else 'нет'}"
+    )
+    await message.answer(text)
+
+# ─────────── МОДЕРАЦИЯ ───────────
+async def apply_punishment(message: Message, command: str):
+    parts = message.text.split()
+    duration_str = parts[1] if len(parts) > 1 else "inf"
+    target_arg = parts[2] if len(parts) > 2 and not message.reply_to_message else None
+    reason = " ".join(parts[3:] if target_arg else parts[2:]) or "не указана"
+    user_target = await resolve_user(message, target_arg)
+    if not user_target:
+        return
+    cmd_map = {"мут": "can_mute", "бан": "can_ban", "кик": "can_kick"}
+    if not await has_permission(message.chat.id, message.from_user.id, cmd_map.get(command, "")):
+        await message.answer(
+            f"❌ Вы не можете {command} этого участника.\n"
+            f"💡 Только создатель группы или пользователь с правами +lm может это сделать."
+        )
+        return
+    until_time = parse_time(duration_str)
+    until_ts = datetime.utcnow() + until_time if until_time else None
+    kb = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("Снять ограничение", callback_data=f"un{command}_{message.chat.id}_{user_target.id}")
+    ) if command in ("мут", "бан") else None
+    if command == "мут":
+        await bot.restrict_chat_member(message.chat.id, user_target.id, permissions=perms_mute(), until_date=until_ts)
+    elif command == "бан":
+        await bot.ban_chat_member(message.chat.id, user_target.id, until_date=until_ts)
+    elif command == "кик":
+        await bot.ban_chat_member(message.chat.id, user_target.id)
+        await bot.unban_chat_member(message.chat.id, user_target.id)
+    await message.answer(
+        f"⚠️ <b>{user_target.full_name}</b> {command}!\n"
+        f"⏱ Время: {duration_str}\n📄 Причина: {reason}\n🛡 Модератор: {message.from_user.full_name}",
+        reply_markup=kb
+    )
+    if command in ("мут", "бан"):
+        cur.execute("INSERT INTO punishments(chat_id,user_id,type,until,reason) VALUES(?,?,?,?,?)",
+                    (message.chat.id, user_target.id, command, until_ts, reason))
+        conn.commit()
+
+# Команды
+@dp.message(F.text.regexp(r"(?i)^/m(\s|$)"))
+async def mute_cmd(message: Message):
+    await apply_punishment(message, "мут")
+
+@dp.message(F.text.regexp(r"(?i)^/b(\s|$)"))
+async def ban_cmd(message: Message):
+    await apply_punishment(message, "бан")
+
+@dp.message(F.text.regexp(r"(?i)^/k(\s|$)"))
+async def kick_cmd(message: Message):
+    await apply_punishment(message, "кик")
+
+@dp.message(F.text.regexp(r"(?i)^/rm(\s|$)"))
+async def unmute_cmd(message: Message):
+    parts = message.text.split()
+    target_arg = parts[1] if len(parts) > 1 else None
+    user_target = await resolve_user(message, target_arg)
+    if not user_target:
+        return
+    if not await has_permission(message.chat.id, message.from_user.id, "can_mute"):
+        await message.answer("❌ Вы не можете размучить этого участника.")
+        return
+    await bot.restrict_chat_member(message.chat.id, user_target.id, permissions=perms_all())
+    await message.answer(f"🔓 <b>{user_target.full_name}</b> размучен\n🛡 Модератор: {message.from_user.full_name}")
+    cur.execute("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='мут'", (message.chat.id, user_target.id))
+    conn.commit()
+
+@dp.message(F.text.regexp(r"(?i)^/rb(\s|$)"))
+async def unban_cmd(message: Message):
+    parts = message.text.split()
+    target_arg = parts[1] if len(parts) > 1 else None
+    user_target = await resolve_user(message, target_arg)
+    if not user_target:
+        return
+    if not await has_permission(message.chat.id, message.from_user.id, "can_ban"):
+        await message.answer("❌ Вы не можете разбанить этого участника.")
+        return
+    await bot.unban_chat_member(message.chat.id, user_target.id)
+    await message.answer(f"🔓 <b>{user_target.full_name}</b> разбанен\n🛡 Модератор: {message.from_user.full_name}")
+    cur.execute("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='бан'", (message.chat.id, user_target.id))
+    conn.commit()
+
+# ─────────── Callback “Снять ограничение” ───────────
+@dp.callback_query(F.data.regexp(r"^un(мут|бан)_"))
+async def un_punish_cb(query: CallbackQuery):
+    cmd, chat_id, user_id = query.data.split("_")
+    chat_id, user_id = int(chat_id), int(user_id)
+    if cmd == "мут":
+        await bot.restrict_chat_member(chat_id, user_id, permissions=perms_all())
+        cur.execute("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='мут'", (chat_id, user_id))
+    elif cmd == "бан":
+        await bot.unban_chat_member(chat_id, user_id)
+        cur.execute("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='бан'", (chat_id, user_id))
+    conn.commit()
+    await query.message.edit_text(f"✅ Ограничение снято (автор: {query.from_user.full_name})")
+
+# ─────────── Авто-размут/разбан ───────────
+async def punishment_watcher():
+    while True:
+        now = datetime.utcnow()
+        cur.execute("SELECT chat_id, user_id, type FROM punishments WHERE until IS NOT NULL AND until<=?", (now,))
+        rows = cur.fetchall()
+        for chat_id, user_id, type_ in rows:
+            try:
+                if type_ == "мут":
+                    await bot.restrict_chat_member(chat_id, user_id, permissions=perms_all())
+                elif type_ == "бан":
+                    await bot.unban_chat_member(chat_id, user_id)
+                cur.execute("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type=?", (chat_id, user_id, type_))
+            except:
+                pass
+        conn.commit()
+        await asyncio.sleep(10)
+
+# ─────────── /start, /startpuls ───────────
+@dp.message(F.text.regexp(r"(?i)^/start$"))
+@dp.message(F.text.regexp(r"(?i)^/startpuls"))
+async def start_cmd(message: Message):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📜 Правила бота", url="https://t.me/RulesPulsOfficial/8"),
+        InlineKeyboardButton("🛠 Админ-панель", callback_data="admin_panel"),
+        InlineKeyboardButton("🎮 Играть", callback_data="game")
+    )
+    text = (
+        f"🎉 Привет! Я — Puls Bot 🎊\n"
+        f"Я помогу вам с модерацией, играми и мини-экономикой.\n"
+        f"Используйте кнопки ниже, чтобы ознакомиться с функциями!"
+    )
+    await message.answer(text, reply_markup=kb)
+
+# ─────────── /helppuls ───────────
 @dp.message(F.text.regexp(r"(?i)^(/helppuls|помощь)$"))
 async def help_cmd(message: Message):
     await message.answer(
-        "📖 <b>Команды Puls Bot</b>\n\n"
-        "🛡 Модерация:\n"
-        "/m — мут\n"
-        "/rm — размут\n"
-        "/b — бан\n"
-        "/rb — разбан\n"
+        "📖 Доступные команды:\n"
+        "Модерация:\n"
+        "/m — мут, /rm — размут\n"
+        "/b — бан, /rb — разбан\n"
         "/k — кик\n\n"
-        "ℹ️ Прочее:\n"
-        "/start — старт\n"
-        "/helppuls — помощь\n\n"
-        "🚧 Дополнительные функции находятся в разработке."
+        "Игры и экономика:\n"
+        "/gamepuls — мини-игра, /работать — заработать доллары\n\n"
+        "Прочее:\n"
+        "/start, /startpuls — старт и приветствие\n\n"
+        "⚠️ Полное руководство в разработке."
     )
-
-# ─────────── АДМИН ПАНЕЛЬ ───────────
-@dp.callback_query(F.data == "admin_panel")
-async def admin_panel(query: CallbackQuery):
-    user_id = query.from_user.id
-
-    cur.execute("SELECT unlocked, blocked_until FROM admin_access WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-
-    now = int(datetime.utcnow().timestamp())
-
-    if row:
-        unlocked, blocked_until = row
-        if blocked_until and now < blocked_until:
-            wait = blocked_until - now
-            await query.answer(
-                f"⛔ Доступ заблокирован\n⏳ Осталось: {wait} сек.",
-                show_alert=True
-            )
-            return
-
-        if unlocked:
-            await query.message.answer("🛠 <b>Админ-панель активна</b>")
-            return
-
-    await query.message.answer(
-        "🔐 <b>Введите пароль для доступа к админ-панели</b>\n\n"
-        "Отправьте пароль следующим сообщением."
-    )
-
-# ─────────── ПАРОЛЬ ───────────
-@dp.message(F.text)
-async def admin_password_check(message: Message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-
-    cur.execute("SELECT attempts, blocked_until FROM admin_access WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    now = int(datetime.utcnow().timestamp())
-
-    attempts = row[0] if row else 0
-    blocked_until = row[1] if row else None
-
-    if blocked_until and now < blocked_until:
-        return
-
-    if text == ADMIN_PASSWORD:
-        cur.execute("""
-        INSERT OR REPLACE INTO admin_access (user_id, unlocked, attempts, blocked_until)
-        VALUES (?, 1, 0, NULL)
-        """, (user_id,))
-        conn.commit()
-
-        await message.answer("✅ <b>Доступ к админ-панели открыт</b>")
-    else:
-        attempts += 1
-        if attempts >= 2:
-            block_until = now + 300
-            cur.execute("""
-            INSERT OR REPLACE INTO admin_access (user_id, unlocked, attempts, blocked_until)
-            VALUES (?, 0, ?, ?)
-            """, (user_id, attempts, block_until))
-            conn.commit()
-            await message.answer("⛔ Неверный пароль.\nДоступ заблокирован на 5 минут.")
-        else:
-            cur.execute("""
-            INSERT OR REPLACE INTO admin_access (user_id, unlocked, attempts, blocked_until)
-            VALUES (?, 0, ?, NULL)
-            """, (user_id, attempts))
-            conn.commit()
-            await message.answer("❌ Неверный пароль. Осталась 1 попытка.")
 
 # ─────────── ЗАПУСК ───────────
 async def main():
-    print("✅ Puls Bot запущен")
+    asyncio.create_task(punishment_watcher())
+    print("Puls Bot запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
